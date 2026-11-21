@@ -20,11 +20,10 @@ TAKIP_URL_LERI = [
     "https://istanbulanadolu.adalet.gov.tr/Arsiv/duyuru",
 ]
 
-DOGRUDAN_KELIMELER = (
-    "zabıt", "zabit", "katip", "katib",
+SONUC_KELIMELERI = (
     "mülakat", "mulakat", "sözlü", "sozlu",
-    "nihai başarı", "nihai basari", "nihai sonuç", "nihai sonuc",
-    "sözleşmeli personel", "sozlesmeli personel",
+    "nihai", "sonuç", "sonuc", "başarı", "basari",
+    "kazanan", "asil", "yedek",
 )
 
 HEADERS = {
@@ -49,6 +48,22 @@ def normalize_tr(metin):
     for eski, yeni in donusum.items():
         metin = metin.replace(eski, yeni)
     return " ".join(metin.lower().split())
+
+
+def zabit_mulakat_mi(ham_baslik):
+    """Sadece Zabıt Katipliği (veya toplu personel) mülakat/nihai sonuç duyurularını yakalar."""
+    temiz = normalize_tr(ham_baslik)
+
+    zabit_var = ("zabıt" in temiz) or ("zabit" in temiz)
+    katip_var = (("katip" in temiz) or ("katib" in temiz)) and ("icra" not in temiz)
+    toplu_personel_var = (
+        ("sözleşmeli personel" in temiz) or ("sozlesmeli personel" in temiz)
+    ) and ("icra" not in temiz)
+
+    kadro_uygun = zabit_var or katip_var or toplu_personel_var
+    sonuc_uygun = any(k in temiz for k in SONUC_KELIMELERI)
+
+    return kadro_uygun and sonuc_uygun
 
 
 def bildirim_gonder(baslik_ascii, mesaj, link=None, oncelik="default", etiket="white_check_mark"):
@@ -97,8 +112,7 @@ def duyurulari_cek():
             if len(ham_baslik) < 10:
                 continue
 
-            temiz = normalize_tr(ham_baslik)
-            if any(k in temiz for k in DOGRUDAN_KELIMELER):
+            if zabit_mulakat_mi(ham_baslik):
                 tam_link = urljoin(BASE_URL, a["href"])
                 bulunanlar[tam_link] = ham_baslik
 
@@ -130,10 +144,13 @@ def main():
             gorulenler = json.load(f)
 
     if TEST_MODU:
-        ornek_link, ornek_baslik = next(iter(guncel_duyurular.items()), (BASE_URL, "Eşleşen eski duyuru yok"))
+        ornek_link, ornek_baslik = next(
+            iter(guncel_duyurular.items()),
+            (BASE_URL, "Eşleşen eski Zabıt Katipliği duyurusu yok"),
+        )
         bildirim_gonder(
             baslik_ascii="7/24 TAKIP TESTI BASARILI!",
-            mesaj=f"[{saat}] Site okundu ({len(guncel_duyurular)} duyuru bulundu).\nÖrnek: {ornek_baslik}",
+            mesaj=f"[{saat}] Zabıt Katipliği filtresi aktif ({len(guncel_duyurular)} eski kayıt tarandı).\nÖrnek: {ornek_baslik}",
             link=ornek_link,
             oncelik="urgent",
             etiket="rotating_light",
@@ -148,35 +165,53 @@ def main():
             json.dump(guncel_duyurular, f, ensure_ascii=False, indent=2)
         bildirim_gonder(
             baslik_ascii="7/24 Bulut Takibi Aktif",
-            mesaj=f"[{saat}] Anadolu Adliyesi bulut takibi başladı. {len(guncel_duyurular)} eski duyuru kaydedildi.",
+            mesaj=f"[{saat}] Zabıt Katipliği mülakat takibi başladı. {len(guncel_duyurular)} eski duyuru kaydedildi.",
             oncelik="default",
             etiket="white_check_mark",
         )
         return
 
-    yeni_bulundu = False
+    # Yeni eşleşen duyuru var mı kontrol et ve aktif alarma ekle
+    alarmlar = gorulenler.get("__AKTIF_ALARMLAR__", [])
     for link, baslik in guncel_duyurular.items():
         if link not in gorulenler:
-            yeni_bulundu = True
             gorulenler[link] = baslik
+            alarmlar.append({
+                "baslik": baslik,
+                "link": link,
+                "ilk_saat": saat,
+                "tekrar": 0,
+            })
+
+    # Sonuç açıklandıysa her kontrolde alarmı tekrar çal (asla "yeni duyuru yok" deme)
+    if alarmlar:
+        for alarm in alarmlar:
+            alarm["tekrar"] += 1
             bildirim_gonder(
-                baslik_ascii="YENI ZABIT KATIBI DUYURUSU!",
-                mesaj=f"[{saat}] Yeni duyuru yayınlandı:\n{baslik}",
-                link=link,
+                baslik_ascii=f"ACIKLANDI! (Uyari #{alarm['tekrar']})",
+                mesaj=(
+                    f"[{saat}] ZABIT KÂTİPLİĞİ MÜLAKAT / SONUÇ AÇIKLANDI!\n\n"
+                    f"{alarm['baslik']}\n"
+                    f"(İlk tespit saati: {alarm['ilk_saat']})"
+                ),
+                link=alarm["link"],
                 oncelik="urgent",
-                etiket="rotating_light",
+                etiket="rotating_light,tada",
             )
 
-    if yeni_bulundu:
+        gorulenler["__AKTIF_ALARMLAR__"] = alarmlar
         with open(KAYIT_DOSYASI, "w", encoding="utf-8") as f:
             json.dump(gorulenler, f, ensure_ascii=False, indent=2)
-    else:
-        bildirim_gonder(
-            baslik_ascii="Kontrol Edildi - Yeni Duyuru Yok",
-            mesaj=f"[{saat}] Anadolu Adliyesi kontrol edildi, yeni duyuru yok. (Kayıtlı: {len(gorulenler)})",
-            oncelik="default",
-            etiket="white_check_mark",
-        )
+        return
+
+    # Henüz açıklanmadıysa normal durum bildirimi gönder
+    kayitli_sayi = sum(1 for k in gorulenler if not k.startswith("__"))
+    bildirim_gonder(
+        baslik_ascii="Kontrol Edildi - Yeni Duyuru Yok",
+        mesaj=f"[{saat}] Zabıt Katipliği mülakat sonucu henüz açıklanmadı. (Kayıtlı: {kayitli_sayi})",
+        oncelik="default",
+        etiket="white_check_mark",
+    )
 
 
 if __name__ == "__main__":
