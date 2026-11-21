@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
@@ -19,7 +20,6 @@ TAKIP_URL_LERI = [
     "https://istanbulanadolu.adalet.gov.tr/Arsiv/duyuru",
 ]
 
-# Hiçbir başlık ihtimalini kaçırmamak için genişletilmiş anahtar kelimeler
 DOGRUDAN_KELIMELER = (
     "zabıt", "zabit", "katip", "katib",
     "mülakat", "mulakat", "sözlü", "sozlu",
@@ -37,6 +37,10 @@ HEADERS = {
 }
 
 
+def tr_saati():
+    return datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
+
+
 def normalize_tr(metin):
     donusum = {
         "İ": "i", "I": "ı", "Â": "a", "â": "a",
@@ -47,11 +51,11 @@ def normalize_tr(metin):
     return " ".join(metin.lower().split())
 
 
-def bildirim_gonder(baslik_ascii, mesaj, link=None, oncelik="urgent"):
+def bildirim_gonder(baslik_ascii, mesaj, link=None, oncelik="default", etiket="white_check_mark"):
     headers = {
         "Title": baslik_ascii,
         "Priority": oncelik,
-        "Tags": "rotating_light",
+        "Tags": etiket,
     }
     if link:
         headers["Click"] = link
@@ -70,7 +74,6 @@ def sayfayi_indir(url):
     try:
         return requests.get(url, headers=HEADERS, timeout=25)
     except requests.exceptions.SSLError:
-        # Bazı kamu sitelerinin SSL zinciri Linux sunucularda hata verebiliyor
         return requests.get(url, headers=HEADERS, timeout=25, verify=False)
 
 
@@ -107,16 +110,17 @@ def main():
         print("HATA: NTFY_KANALI secret ayarı boş!")
         sys.exit(1)
 
+    saat = tr_saati()
     guncel_duyurular, basarili = duyurulari_cek()
 
     if not basarili:
         print("HATA: Adliye sitesine erişilemedi.")
-        if TEST_MODU:
-            bildirim_gonder(
-                baslik_ascii="TEST BASARISIZ",
-                mesaj="GitHub sunucusu Anadolu Adliyesi sitesine erişemedi (yurt dışı IP engeli olabilir).",
-                oncelik="high",
-            )
+        bildirim_gonder(
+            baslik_ascii="Siteye Erisilemedi",
+            mesaj=f"[{saat}] Anadolu Adliyesi sitesine ulaşılamadı, sonraki kontrolde tekrar denenecek.",
+            oncelik="low",
+            etiket="warning",
+        )
         sys.exit(1)
 
     ilk_calisma = not os.path.exists(KAYIT_DOSYASI)
@@ -129,9 +133,10 @@ def main():
         ornek_link, ornek_baslik = next(iter(guncel_duyurular.items()), (BASE_URL, "Eşleşen eski duyuru yok"))
         bildirim_gonder(
             baslik_ascii="7/24 TAKIP TESTI BASARILI!",
-            mesaj=f"Site okundu ({len(guncel_duyurular)} duyuru bulundu).\nÖrnek: {ornek_baslik}",
+            mesaj=f"[{saat}] Site okundu ({len(guncel_duyurular)} duyuru bulundu).\nÖrnek: {ornek_baslik}",
             link=ornek_link,
             oncelik="urgent",
+            etiket="rotating_light",
         )
         if ilk_calisma:
             with open(KAYIT_DOSYASI, "w", encoding="utf-8") as f:
@@ -143,8 +148,9 @@ def main():
             json.dump(guncel_duyurular, f, ensure_ascii=False, indent=2)
         bildirim_gonder(
             baslik_ascii="7/24 Bulut Takibi Aktif",
-            mesaj=f"Anadolu Adliyesi bulut takibi başladı. {len(guncel_duyurular)} eski duyuru kaydedildi, yenisi gelince anında haber vereceğim.",
+            mesaj=f"[{saat}] Anadolu Adliyesi bulut takibi başladı. {len(guncel_duyurular)} eski duyuru kaydedildi.",
             oncelik="default",
+            etiket="white_check_mark",
         )
         return
 
@@ -155,16 +161,22 @@ def main():
             gorulenler[link] = baslik
             bildirim_gonder(
                 baslik_ascii="YENI ZABIT KATIBI DUYURUSU!",
-                mesaj=f"Yeni duyuru yayınlandı:\n{baslik}",
+                mesaj=f"[{saat}] Yeni duyuru yayınlandı:\n{baslik}",
                 link=link,
                 oncelik="urgent",
+                etiket="rotating_light",
             )
 
     if yeni_bulundu:
         with open(KAYIT_DOSYASI, "w", encoding="utf-8") as f:
             json.dump(gorulenler, f, ensure_ascii=False, indent=2)
     else:
-        print(f"Kontrol tamamlandı, yeni duyuru yok. (Kayıtlı: {len(gorulenler)})")
+        bildirim_gonder(
+            baslik_ascii="Kontrol Edildi - Yeni Duyuru Yok",
+            mesaj=f"[{saat}] Anadolu Adliyesi kontrol edildi, yeni duyuru yok. (Kayıtlı: {len(gorulenler)})",
+            oncelik="default",
+            etiket="white_check_mark",
+        )
 
 
 if __name__ == "__main__":
