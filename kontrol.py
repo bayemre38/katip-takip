@@ -14,6 +14,10 @@ NTFY_KANALI = os.environ.get("NTFY_KANALI", "").strip()
 TEST_MODU = os.environ.get("TEST_MODU", "false").lower() == "true"
 KAYIT_DOSYASI = "gorulen_duyurular.json"
 
+# Rutin "henüz açıklanmadı" bildirimlerinin geleceği saat aralığı (Her gün)
+GUNDUZ_BASLANGIC_SAAT = 8   # 08:00
+GUNDUZ_BITIS_SAAT = 19      # 19:00
+
 BASE_URL = "https://istanbulanadolu.adalet.gov.tr/"
 TAKIP_URL_LERI = [
     "https://istanbulanadolu.adalet.gov.tr/",
@@ -36,8 +40,13 @@ HEADERS = {
 }
 
 
-def tr_saati():
-    return datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M")
+def tr_simdi():
+    return datetime.now(timezone(timedelta(hours=3)))
+
+
+def rutin_bildirim_zamani_mi(simdi):
+    """Hafta içi ve hafta sonu dahil her gün sadece gündüz saatlerinde True döner."""
+    return GUNDUZ_BASLANGIC_SAAT <= simdi.hour < GUNDUZ_BITIS_SAAT
 
 
 def normalize_tr(metin):
@@ -124,17 +133,21 @@ def main():
         print("HATA: NTFY_KANALI secret ayarı boş!")
         sys.exit(1)
 
-    saat = tr_saati()
+    simdi = tr_simdi()
+    saat = simdi.strftime("%H:%M")
+    rutin_acik = rutin_bildirim_zamani_mi(simdi)
+
     guncel_duyurular, basarili = duyurulari_cek()
 
     if not basarili:
-        print("HATA: Adliye sitesine erişilemedi.")
-        bildirim_gonder(
-            baslik_ascii="Siteye Erisilemedi",
-            mesaj=f"[{saat}] Anadolu Adliyesi sitesine ulaşılamadı, sonraki kontrolde tekrar denenecek.",
-            oncelik="low",
-            etiket="warning",
-        )
+        print(f"[{saat}] HATA: Adliye sitesine erişilemedi.")
+        if rutin_acik or TEST_MODU:
+            bildirim_gonder(
+                baslik_ascii="Siteye Erisilemedi",
+                mesaj=f"[{saat}] Anadolu Adliyesi sitesine ulaşılamadı, sonraki kontrolde tekrar denenecek.",
+                oncelik="low",
+                etiket="warning",
+            )
         sys.exit(1)
 
     ilk_calisma = not os.path.exists(KAYIT_DOSYASI)
@@ -183,7 +196,7 @@ def main():
                 "tekrar": 0,
             })
 
-    # Sonuç açıklandıysa her kontrolde alarmı tekrar çal (asla "yeni duyuru yok" deme)
+    # Sonuç açıklandıysa gün/saat fark etmeksizin her kontrolde alarm çal
     if alarmlar:
         for alarm in alarmlar:
             alarm["tekrar"] += 1
@@ -204,14 +217,17 @@ def main():
             json.dump(gorulenler, f, ensure_ascii=False, indent=2)
         return
 
-    # Henüz açıklanmadıysa normal durum bildirimi gönder
+    # Henüz açıklanmadıysa her gün gündüz saatlerinde bildirim at
     kayitli_sayi = sum(1 for k in gorulenler if not k.startswith("__"))
-    bildirim_gonder(
-        baslik_ascii="Kontrol Edildi - Yeni Duyuru Yok",
-        mesaj=f"[{saat}] Zabıt Katipliği mülakat sonucu henüz açıklanmadı. (Kayıtlı: {kayitli_sayi})",
-        oncelik="default",
-        etiket="white_check_mark",
-    )
+    if rutin_acik:
+        bildirim_gonder(
+            baslik_ascii="Kontrol Edildi - Yeni Duyuru Yok",
+            mesaj=f"[{saat}] Zabıt Katipliği mülakat sonucu henüz açıklanmadı. (Kayıtlı: {kayitli_sayi})",
+            oncelik="default",
+            etiket="white_check_mark",
+        )
+    else:
+        print(f"[{saat}] Gece sessiz mod: Kontrol yapıldı, yeni duyuru yok. (Kayıtlı: {kayitli_sayi})")
 
 
 if __name__ == "__main__":
